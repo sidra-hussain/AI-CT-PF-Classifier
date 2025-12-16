@@ -207,8 +207,3 @@ def create_train_test_val(root_dir, csv_file, batch_size=8, num_workers=4, test_
         "val_loader": val_loader,
         "test_loader": test_loader
     }
-
-
-
-
-
