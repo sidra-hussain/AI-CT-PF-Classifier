@@ -13,8 +13,57 @@ import numpy as np
 from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import StratifiedShuffleSplit
 from tqdm import tqdm
+from dotenv import load_dotenv
+from azure.storage.blob import ContainerClient
+import io
+import pydicom
+import numpy as np
 
-def load_dicom_volume(folder_path):
+##This function does not work, its getting an un
+def load_all_dicom_volumes_from_azure(container_url, folder_path="dataset/", credential=None):
+    """
+    Loads all DICOM volumes from all patient folders inside the given dataset folder in Azure Blob Storage.
+    Args:
+        container_url (str): Azure container URL (e.g. "https://<account>.blob.core.windows.net/<container>")
+        folder_path (str): Path to the dataset folder inside the container (default: "dataset/")
+        credential: Optional credential (SAS token, account key, or DefaultAzureCredential)
+    Returns:
+        dict: {patient_id: (image_stack, spacing)}
+    """
+
+    container = ContainerClient.from_container_url(container_url, credential=credential)
+    # Find all unique patient folders (assumes structure: dataset/patient_id/file.dcm)
+    patient_folders = set()
+    for blob in container.list_blobs(name_starts_with=folder_path):
+        parts = blob.name.split('/')
+        if len(parts) > 2:  # e.g., ['dataset', 'patient123', 'IM0001.dcm']
+            patient_folders.add('/'.join(parts[:2]) + '/')
+    results = {}
+    for patient_folder in sorted(patient_folders):
+        dicoms = []
+        for blob in container.list_blobs(name_starts_with=patient_folder):
+            if blob.name.lower().endswith('.dcm'):
+                stream = container.download_blob(blob.name)
+                dicom_bytes = stream.readall()
+                dicom_file = io.BytesIO(dicom_bytes)
+                dicom = pydicom.dcmread(dicom_file)
+                dicoms.append(dicom)
+        if not dicoms:
+            print(f"Warning: No DICOM files found in {patient_folder}")
+            continue
+        dicoms.sort(key=lambda x: float(x.ImagePositionPatient[2]) if 'ImagePositionPatient' in x else int(x.InstanceNumber))
+        image_stack = np.stack([d.pixel_array for d in dicoms])
+        try:
+            spacing = list(map(float, dicoms[0].PixelSpacing))
+            slice_thickness = float(dicoms[0].SliceThickness)
+            spacing.append(slice_thickness)
+        except Exception:
+            spacing = [1.0, 1.0, 1.0]
+        patient_id = patient_folder.strip('/').split('/')[-1]
+        results[patient_id] = (image_stack, spacing)
+    return image_stack, spacing
+
+def load_dicom_volume_local_dir(folder_path):
     # Load all DICOM files in the folder
     dicoms = []
     for filename in os.listdir(folder_path):
@@ -67,8 +116,16 @@ def normalize_ct(volume, clip_min=-1000, clip_max=400):
     volume = (volume - clip_min) / (clip_max - clip_min)  # normalize to [0, 1]
     return volume.astype(np.float32)
 
+
+##Create a version of this function that does this from a local directory
 def load_and_process_dicom(folder_path):
-    volume, spacing = load_dicom_volume(folder_path)
+    # Load environment variables from .env file
+    load_dotenv()
+
+    # Get Azure Storage Key from environment
+    AZURE_STORAGE_SAS_TOKEN = os.environ.get('AZURE_STORAGE_SAS_TOKEN')
+
+    volume, spacing = load_all_dicom_volumes_from_azure(container_url="https://staictpfscans001.blob.core.windows.net/pf-ct-scans", folder_path = "dataset/", credential=AZURE_STORAGE_SAS_TOKEN)
     resampled = resample_volume(volume, spacing, [1.0, 1.0, 1.0])
     normalized = normalize_ct(resampled)
     return normalized  # shape: (D, H, W)
@@ -104,9 +161,38 @@ def create_montage_tensor(volume):
     tensor = tensor.unsqueeze(0)  # add batch dim: (B=1, C=1, D=10, H, W)
     return tensor
 
+from azure.storage.blob import ContainerClient
+import pandas as pd
+import io
+import os
+from dotenv import load_dotenv
+
+def load_labels_csv_from_azure(container_url, csv_blob_path, credential=None):
+    """
+    Downloads a CSV file from Azure Blob Storage and loads it into a pandas DataFrame.
+    Args:
+        container_url (str): Azure container URL (e.g. "https://<account>.blob.core.windows.net/<container>")
+        csv_blob_path (str): Path to the CSV blob inside the container (e.g. "dataset/labels_binary.csv")
+        credential: Optional credential (SAS token, account key, or DefaultAzureCredential)
+    Returns:
+        pd.DataFrame: DataFrame containing the CSV data
+    """
+    container = ContainerClient.from_container_url(container_url, credential=credential)
+    blob_client = container.get_blob_client(csv_blob_path)
+    stream = blob_client.download_blob()
+    csv_bytes = stream.readall()
+    csv_file = io.BytesIO(csv_bytes)
+    df = pd.read_csv(csv_file)
+    return df
+
+#figure out how to get this to switch between local and azure, programatically
 class DicomMontageDataset(Dataset):
     def __init__(self, csv_file, root_dir, transform=None):
-        self.labels_df = pd.read_csv(csv_file)
+        load_dotenv()
+        self.labels_df = load_labels_csv_from_azure(
+            container_url="https://staictpfscans001.blob.core.windows.net/pf-ct-scans",
+            csv_blob_path=csv_file,
+            credential=os.environ.get('AZURE_STORAGE_SAS_TOKEN'))
         self.root_dir = root_dir
         self.transform = transform
 
