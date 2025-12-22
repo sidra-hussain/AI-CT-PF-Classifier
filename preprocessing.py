@@ -125,7 +125,7 @@ def load_and_process_dicom(folder_path):
     # Get Azure Storage Key from environment
     AZURE_STORAGE_SAS_TOKEN = os.environ.get('AZURE_STORAGE_SAS_TOKEN')
 
-    volume, spacing = load_all_dicom_volumes_from_azure(container_url="https://staictpfscans001.blob.core.windows.net/pf-ct-scans", folder_path = "dataset/", credential=AZURE_STORAGE_SAS_TOKEN)
+    volume, spacing = load_all_dicom_volumes_from_azure(container_url="https://staictpfscans001.blob.core.windows.net/pf-ct-scans", folder_path = folder_path, credential=AZURE_STORAGE_SAS_TOKEN)
     resampled = resample_volume(volume, spacing, [1.0, 1.0, 1.0])
     normalized = normalize_ct(resampled)
     return normalized  # shape: (D, H, W)
